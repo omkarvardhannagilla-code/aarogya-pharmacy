@@ -30,24 +30,88 @@ ${cart.map((i) => `- ${i.name} | generic: ${i.generic} | qty ${i.qty} | ${i.rx ?
 export async function POST(req) {
   try {
     const { imageBase64, mimeType = 'image/jpeg', cart = [] } = await req.json();
-    const key = process.env.GEMINI_API_KEY;
-    if (!key) return Response.json({ error: 'GEMINI_API_KEY not configured — see SETUP.md' }, { status: 500 });
+    const groqKey = process.env.GROQ_API_KEY;
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (!groqKey && !geminiKey) return Response.json({ error: 'No AI key configured (GROQ_API_KEY) — see SETUP.md' }, { status: 500 });
     if (!imageBase64) return Response.json({ error: 'No image received' }, { status: 400 });
 
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [
-          { text: PROMPT(cart) },
-          { inline_data: { mime_type: mimeType, data: imageBase64 } },
-        ]}],
-        generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
-      }),
-    });
-    const data = await r.json();
+    // Provider cascade — Groq vision first (generous free tier, key already set),
+    // Gemini kept as last-resort backup. Each attempt surfaces REAL errors:
+    // a failed API call must never masquerade as an image-quality rejection.
+    const callGroq = async (model) => {
+      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${groqKey}` },
+        body: JSON.stringify({
+          model,
+          temperature: 0.1,
+          max_tokens: 2000,
+          response_format: { type: 'json_object' },
+          messages: [{ role: 'user', content: [
+            { type: 'text', text: PROMPT(cart) },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ]}],
+        }),
+      });
+      const j = await r.json();
+      if (j.error) return { error: { code: r.status, message: j.error.message || String(j.error) } };
+      return { raw: j.choices?.[0]?.message?.content };
+    };
+    const callGemini = async (model) => {
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { text: PROMPT(cart) },
+            { inline_data: { mime_type: mimeType, data: imageBase64 } },
+          ]}],
+          generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
+        }),
+      });
+      const j = await r.json();
+      if (j.error) return { error: { code: j.error.code, message: j.error.message } };
+      return { raw: j.candidates?.[0]?.content?.parts?.[0]?.text };
+    };
+
+    const ATTEMPTS = [
+      ...(groqKey ? [
+        ['groq', 'meta-llama/llama-4-maverick-17b-128e-instruct'],
+        ['groq', 'meta-llama/llama-4-scout-17b-16e-instruct'],
+      ] : []),
+      ...(geminiKey ? [
+        ['gemini', 'gemini-2.5-flash'],
+        ['gemini', 'gemini-2.5-flash-lite'],
+      ] : []),
+    ];
+    let data = null;
+    for (let i = 0; i < ATTEMPTS.length; i++) {
+      const [provider, model] = ATTEMPTS[i];
+      data = provider === 'groq' ? await callGroq(model) : await callGemini(model);
+      if (!data.error && data.raw) break;
+      console.error(`${provider} ${model} error:`, data.error?.code, data.error?.message || 'empty response');
+      if (data.error && ![429, 404, 400, 413, 500, 503].includes(data.error.code)) break; // auth/other hard errors: stop
+      if (i < ATTEMPTS.length - 1) await new Promise((r) => setTimeout(r, 800));
+    }
+    if (data?.error || !data?.raw) {
+      const code = data?.error?.code;
+      const msg = code === 429
+        ? 'The AI verifier is busy right now. Please wait a minute and try again.'
+        : `Verification service error (${code || 'no output'}). Please try again in a minute.`;
+      return Response.json({ error: msg }, { status: 502 });
+    }
+    const raw = data.raw;
+    if (!raw) {
+      console.error('Verifier empty response:', JSON.stringify(data).slice(0, 500));
+      return Response.json({ error: 'The verifier could not process this image. Please try again.' }, { status: 502 });
+    }
     let report;
-    try { report = JSON.parse(data.candidates?.[0]?.content?.parts?.[0]?.text || '{}'); }
+    const cleaned = raw.replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
+    try { report = JSON.parse(cleaned); }
     catch { return Response.json({ error: 'Could not read the prescription. Please upload a clearer photo.' }, { status: 422 }); }
+    if (!report || typeof report !== 'object' || !report.quality) {
+      console.error('Verifier malformed report:', cleaned.slice(0, 300));
+      return Response.json({ error: 'The verifier returned an unexpected result. Please try again.' }, { status: 502 });
+    }
 
     // Decision policy (pre-screen): hard-reject only clear failures; owner gets final say.
     let decision = 'approved'; let reason = 'All checks passed.';

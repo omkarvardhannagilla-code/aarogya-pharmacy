@@ -31,6 +31,7 @@ export default function Navbar() {
         <nav className="hidden items-center gap-5 text-sm font-semibold text-ink md:flex">
           <Link href="/shop" className="hover:text-pine">Home</Link>
           <Link href="/medicines" className="hover:text-pine">Medicines</Link>
+          <Link href="/orders" className="hover:text-pine">My Orders</Link>
           <Link href="/about" className="hover:text-pine">About</Link>
         </nav>
         <button onClick={openDrawer} className="relative grid h-10 w-10 place-items-center rounded-full hairline bg-white text-pine transition hover:bg-mint" aria-label={`Open cart, ${count} items`}>

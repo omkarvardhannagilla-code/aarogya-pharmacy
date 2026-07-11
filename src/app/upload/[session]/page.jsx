@@ -2,6 +2,7 @@
 // Mobile page opened by scanning the QR on desktop. Capture → confirm → upload.
 import { useState } from 'react';
 import { useParams } from 'next/navigation';
+import { compressImage } from '../../../lib/compressImage';
 
 export default function MobileUpload() {
   const { session } = useParams();
@@ -9,12 +10,12 @@ export default function MobileUpload() {
   const [mime, setMime] = useState('image/jpeg');
   const [state, setState] = useState('idle'); // idle | sending | done | error
 
-  const onPick = (e) => {
+  const onPick = async (e) => {
     const f = e.target.files?.[0]; if (!f) return;
-    setMime(f.type || 'image/jpeg');
-    const r = new FileReader();
-    r.onload = () => setPreview(r.result);
-    r.readAsDataURL(f);
+    try {
+      setMime('image/jpeg');
+      setPreview(await compressImage(f));
+    } catch { setState('error'); }
   };
   const send = async () => {
     setState('sending');

@@ -5,7 +5,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import QRCode from 'qrcode';
-import { useCart, cartTotal, cartHasRx, cartCount, inr } from '../lib/store';
+import { useCart, useOrders, cartTotal, cartHasRx, cartCount, inr } from '../lib/store';
+import { compressImage } from '../lib/compressImage';
 import QtyStepper from './QtyStepper';
 
 const LANGUAGES = ['English', 'తెలుగు (Telugu)', 'हिन्दी (Hindi)', 'தமிழ் (Tamil)', 'ಕನ್ನಡ (Kannada)', 'اردو (Urdu)', 'मराठी (Marathi)', 'বাংলা (Bengali)'];
@@ -14,6 +15,7 @@ const PROGRESS = ['Uploading prescription…', 'Checking image quality…', 'Rea
 export default function Assistant() {
   const pathname = usePathname();
   const { items, setQty, remove, clear } = useCart();
+  const addOrder = useOrders((s) => s.addOrder);
   const list = Object.values(items);
   const hasRx = cartHasRx(items);
   const total = cartTotal(items);
@@ -105,12 +107,14 @@ export default function Assistant() {
     clearInterval(timer); setVerifying(false); setProgress('');
   };
 
-  const onFile = (e) => {
+  const onFile = async (e) => {
     const f = e.target.files?.[0]; if (!f) return;
-    const r = new FileReader();
-    r.onload = () => { setRxPreview(r.result); runVerification(r.result.split(',')[1], f.type || 'image/jpeg'); };
-    r.readAsDataURL(f);
     e.target.value = '';
+    try {
+      const dataUrl = await compressImage(f); // always jpeg after compression
+      setRxPreview(dataUrl);
+      runVerification(dataUrl.split(',')[1], 'image/jpeg');
+    } catch { setError('Could not read that image file. Please try another photo.'); }
   };
 
   const startQr = async () => {
@@ -157,7 +161,15 @@ export default function Assistant() {
         body: JSON.stringify({ customer: form, items: list, verificationId: verification?.verificationId, language, eta }) });
       const data = await r.json();
       if (data.error) setError(data.error);
-      else { setOrderResult(data); setStep('done'); clear(); }
+      else {
+        addOrder({
+          orderId: data.orderId, status: data.status, placedAt: new Date().toISOString(),
+          items: list.map((i) => ({ id: i.id, name: i.name, qty: i.qty, price: i.price, rx: i.rx })),
+          total, etaText: eta?.text || '24–48 hours',
+          address: `${form.address}, ${form.pincode}`,
+        });
+        setOrderResult(data); setStep('done'); clear();
+      }
     } catch { setError('Could not place the order.'); }
     setPlacing(false);
   };
@@ -347,8 +359,9 @@ export default function Assistant() {
                       <p className="mt-2 font-display text-xl text-pine">Order {orderResult.orderId}</p>
                       <p className="mt-1 text-sm text-ink-soft">{orderResult.message}</p>
                       {eta?.text && <p className="mt-1 text-sm font-semibold text-pine">Estimated delivery: {eta.text}</p>}
+                      <a href="/orders" className="mt-4 inline-block rounded-full bg-pine px-6 py-2.5 font-semibold text-white hover:bg-pine-soft">View my orders →</a>
                       <button onClick={() => { setStep('cart'); setOrderResult(null); setVerification(null); setRxPreview(null); setTab('chat'); }}
-                        className="mt-4 rounded-full bg-pine px-6 py-2.5 font-semibold text-white hover:bg-pine-soft">Done</button>
+                        className="mt-2 text-[12px] font-semibold text-ink-soft underline">Close</button>
                     </div>
                   )}
                 </div>
